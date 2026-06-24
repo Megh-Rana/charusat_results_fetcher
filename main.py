@@ -9,7 +9,7 @@ import curses
 BASE_URL = "https://support.charusat.edu.in/Uniexamresult/"
 
 # ---------------- CONFIG ----------------
-MAX_WORKERS = 3        # 2–3 recommended, 4 max
+MAX_WORKERS = 5        # each worker walks dropdowns once, then chains searches
 ROLL_LIMIT = 120       # safe upper bound for bulk
 REQUEST_TIMEOUT = 20
 # ---------------------------------------
@@ -130,6 +130,87 @@ def fetch_one(inst, degree, sem, exam, enr):
         return None, time.time() - start
 
 
+def prepare_session(inst, degree, sem, exam):
+    """
+    Walk through all dropdowns once and return (session, ready_html).
+    The returned html contains the ViewState needed to submit searches.
+    """
+    session = new_session()
+    html = get_page(session)
+
+    html = select_value(session, html, "ddlInst", {
+        "ddlInst": inst
+    })
+    html = select_value(session, html, "ddlDegree", {
+        "ddlInst": inst,
+        "ddlDegree": degree
+    })
+    html = select_value(session, html, "ddlSem", {
+        "ddlInst": inst,
+        "ddlDegree": degree,
+        "ddlSem": sem
+    })
+    html = select_value(session, html, "ddlScheduleExam", {
+        "ddlInst": inst,
+        "ddlDegree": degree,
+        "ddlSem": sem,
+        "ddlScheduleExam": exam
+    })
+    return session, html
+
+
+def search_with_session(session, html, inst, degree, sem, exam, enr):
+    """
+    Submit a single search using an already-prepared session.
+    Returns (result_dict | None, elapsed, new_html).
+    The new_html should be passed to the next call to keep ViewState fresh.
+    """
+    start = time.time()
+    try:
+        h = get_hidden(html)
+        h.update({
+            "ddlInst": inst,
+            "ddlDegree": degree,
+            "ddlSem": sem,
+            "ddlScheduleExam": exam,
+            "txtEnrNo": enr,
+            "btnSearch": "Search"
+        })
+        result_html = post(session, h)
+
+        if "uclGrdNEP_lblSGPA" not in result_html:
+            return None, time.time() - start, result_html
+
+        soup = BeautifulSoup(result_html, "html.parser")
+        sgpa = soup.find(id="uclGrdNEP_lblSGPA")
+        credits = soup.find(id="uclGrdNEP_lblTotCredit")
+
+        return {
+            "roll": enr,
+            "sgpa": sgpa.text.strip() if sgpa else None,
+            "credits": credits.text.strip() if credits else None,
+            "html": result_html
+        }, time.time() - start, result_html
+
+    except Exception:
+        return None, time.time() - start, html
+
+
+def worker_batch(inst, degree, sem, exam, enrollments):
+    """
+    Process a batch of enrollment numbers using a single prepared session.
+    Walks dropdowns once, then chains searches (~1s each instead of ~21s).
+    """
+    session, html = prepare_session(inst, degree, sem, exam)
+    results = []
+    for enr in enrollments:
+        result, elapsed, html = search_with_session(
+            session, html, inst, degree, sem, exam, enr
+        )
+        results.append((result, elapsed))
+    return results
+
+
 # ========== CURSES MENU (ARROW KEYS) ==========
 
 def menu(stdscr, title, options):
@@ -192,40 +273,42 @@ def bulk_run(inst, degree, sem, exam, prefix):
     highest = 0.0
     topper = None
 
-    print(f"\nRunning bulk with {MAX_WORKERS} workers...\n")
+    # Split enrollment numbers into chunks, one per worker
+    all_enr = [f"{prefix}{i:03d}" for i in range(1, ROLL_LIMIT + 1)]
+    chunk_size = (len(all_enr) + MAX_WORKERS - 1) // MAX_WORKERS
+    chunks = [all_enr[i:i + chunk_size] for i in range(0, len(all_enr), chunk_size)]
+
+    print(f"\nRunning bulk with {MAX_WORKERS} workers "
+          f"({chunk_size} rolls each, session reuse)...\n")
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = []
-
-        for i in range(1, ROLL_LIMIT + 1):
-            enr = f"{prefix}{i:03d}"
-            futures.append(
-                executor.submit(fetch_one, inst, degree, sem, exam, enr)
-            )
+        futures = [
+            executor.submit(worker_batch, inst, degree, sem, exam, chunk)
+            for chunk in chunks
+        ]
 
         for fut in as_completed(futures):
-            result, elapsed = fut.result()
+            for result, elapsed in fut.result():
+                if not result:
+                    continue
 
-            if not result:
-                continue
+                enr = result["roll"]
+                sgpa = result["sgpa"]
 
-            enr = result["roll"]
-            sgpa = result["sgpa"]
+                print(f"[{elapsed:5.2f}s] {enr}  SGPA={sgpa}")
 
-            print(f"[{elapsed:5.2f}s] {enr}  SGPA={sgpa}")
+                rows.append([enr, sgpa, result["credits"]])
 
-            rows.append([enr, sgpa, result["credits"]])
+                try:
+                    s = float(sgpa)
+                    if s > highest:
+                        highest = s
+                        topper = enr
+                except:
+                    pass
 
-            try:
-                s = float(sgpa)
-                if s > highest:
-                    highest = s
-                    topper = enr
-            except:
-                pass
-
-            with open(f"results/html/{enr}.html", "w", encoding="utf-8") as f:
-                f.write(result["html"])
+                with open(f"results/html/{enr}.html", "w", encoding="utf-8") as f:
+                    f.write(result["html"])
 
     with open("results/sgpa_summary.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
