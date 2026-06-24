@@ -10,7 +10,7 @@ BASE_URL = "https://support.charusat.edu.in/Uniexamresult/"
 
 # ---------------- CONFIG ----------------
 MAX_WORKERS = 5        # each worker walks dropdowns once, then chains searches
-ROLL_LIMIT = 120       # safe upper bound for bulk
+ROLL_LIMIT = 150       # safe upper bound for bulk
 REQUEST_TIMEOUT = 20
 # ---------------------------------------
 
@@ -310,13 +310,18 @@ def bulk_run(inst, degree, sem, exam, prefix):
                 with open(f"results/html/{enr}.html", "w", encoding="utf-8") as f:
                     f.write(result["html"])
 
-    with open("results/sgpa_summary.csv", "w", newline="", encoding="utf-8") as f:
+    # Sort by SGPA descending (highest first)
+    rows.sort(key=lambda r: float(r[1]) if r[1] else 0, reverse=True)
+
+    csv_name = f"results/sgpa_{prefix.lower()}_sem{sem}.csv"
+    with open(csv_name, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["Roll No", "SGPA", "Credits"])
         writer.writerows(rows)
 
     print("\nDone.")
     print("Total results:", len(rows))
+    print(f"Saved → {csv_name}")
     if topper:
         print(f"Highest SGPA: {highest} ({topper})")
 
