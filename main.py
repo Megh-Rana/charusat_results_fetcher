@@ -112,7 +112,7 @@ def fetch_one(inst, degree, sem, exam, enr):
 
         html = post(session, h)
 
-        if "SEMESTER  GRADE  REPORT" not in html:
+        if "uclGrdNEP_lblSGPA" not in html:
             return None, time.time() - start
 
         soup = BeautifulSoup(html, "html.parser")
